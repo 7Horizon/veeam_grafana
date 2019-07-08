@@ -86,6 +86,46 @@ Function Get-vPCRepoInfo {
                 $outputAry
         }
 }
+[CmdletBinding()]
+        param (
+                [Parameter(Position=0, ValueFromPipeline=$true)]
+                [PSObject[]]$Repository
+                )
+        Begin {
+                $outputAry = @()
+                Function Build-Object {param($name, $free, $total)
+                        $repoObj = New-Object -TypeName PSObject -Property @{
+                                        Target = $name
+
+                                        StorageFree = [Math]::Round([Decimal]$free/1GB,2)
+                                        StorageTotal = [Math]::Round([Decimal]$total/1GB,2)
+                                        FreePercentage = [Math]::Round(($free/$total)*100)
+                                }
+                        Return $repoObj | Select Target, StorageFree, StorageTotal, FreePercentage
+                }
+        }
+        Process {
+                Foreach ($r in $Repository) {
+						# Refresh Repository Size Info
+						[Veeam.Backup.Core.CBackupRepositoryEx]::SyncSpaceInfoToDb($r, $true)
+						
+						$repoMembers = Get-VBRRepositoryExtent -Repository $r
+						$cachedTotalSpace = 0
+						$cachedFreeSpace = 0
+						
+						Foreach ($m in $repoMembers) {
+							$cachedTotalSpace += $m.Repository.Info.CachedTotalSpace
+							$cachedFreeSpace += $m.Repository.Info.CachedFreeSpace
+						}
+						
+						$outputObj = Build-Object $r.Name $cachedFreeSpace $cachedTotalSpace
+				}
+                $outputAry += $outputObj
+        }
+        End {
+                $outputAry
+        }
+}
 #endregion
 
 #region: Start BRHost Connection
@@ -123,6 +163,7 @@ If ($reportMode -eq "Monthly") {
 # $vbrserverobj = Get-VBRLocalhost        # Get VBR Server object
 # $viProxyList = Get-VBRViProxy           # Get all Proxies
 $repoList = Get-VBRBackupRepository     # Get all Repositories
+$scaleOutList = Get-VBRBackupRepository -ScaleOut     # Get all Scale Out Repositories
 $allSesh = Get-VBRBackupSession         # Get all Sessions (Backup/BackupCopy/Replica)
 # $allResto = Get-VBRRestoreSession       # Get all Restore Sessions
 $seshListBk = @($allSesh | ?{($_.CreationTime -ge (Get-Date).AddHours(-$HourstoCheck)) -and $_.JobType -eq "Backup"})           # Gather all Backup sessions within timeframe
@@ -179,6 +220,18 @@ $RepoReport = $repoList | Get-vPCRepoInfo | Select     @{Name="Repository Name";
                                                        ElseIf ($_.FreePercentage -eq "Unknown") {"Unknown"}
                                                        Else {"OK"}}} | `
                                                        Sort "Repository Name" 
+
+$RepoReport += $scaleOutList | Get-vPCScaleOutRepoInfo | Select     @{Name="Repository Name"; Expression = {$_.Target}},
+                                                       @{Name="Free (GB)"; Expression = {$_.StorageFree}},
+                                                       @{Name="Total (GB)"; Expression = {$_.StorageTotal}},
+                                                       @{Name="Free (%)"; Expression = {$_.FreePercentage}},
+                                                       @{Name="Status"; Expression = {
+                                                       If ($_.FreePercentage -lt $repoCritical) {"Critical"} 
+                                                       ElseIf ($_.FreePercentage -lt $repoWarn) {"Warning"}
+                                                       ElseIf ($_.FreePercentage -eq "Unknown") {"Unknown"}
+                                                       Else {"OK"}}} | `
+                                                       Sort "Repository Name" 
+
 #endregion
 
 #region: Number of Endpoints
